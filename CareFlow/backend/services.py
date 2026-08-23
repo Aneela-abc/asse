@@ -1,7 +1,3 @@
-# ============================================================
-# services.py
-# ============================================================
-
 """
 Core Business Logic and Service Layer for CareFlow Backend.
 Encapsulates transactions, concurrency safeguards, AI processing,
@@ -22,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from typing import Optional, List, Dict, Tuple, Any
 
-from database.db import get_db
+from database.db import get_db, ensure_core_schema
 from backend.config import (
     APP_SECRET,
     LLM_API_KEY,
@@ -115,11 +111,17 @@ def iso_parse(x: str) -> datetime:
 
 def ensure_runtime_tables(c: sqlite3.Connection):
     """
-    Makes sure tables/columns required by background jobs exist.
+    Ensure every table used by services.py exists.
 
-    This is important for Streamlit Cloud because the SQLite database
-    can sometimes be created from an older schema.
+    The database manager already initializes these tables when get_db()
+    opens a connection.  This function is kept here as an additional
+    defensive guard for long-running/background operations and older DBs.
     """
+
+    # --------------------------------------------------------
+    # Core application tables
+    # --------------------------------------------------------
+    ensure_core_schema(c)
 
     # --------------------------------------------------------
     # job_state
@@ -154,17 +156,14 @@ def ensure_runtime_tables(c: sqlite3.Connection):
         """
     )
 
-    # --------------------------------------------------------
-    # Add missing columns if an old notifications table exists
-    # --------------------------------------------------------
     notification_columns = {
         "appointment_id": "TEXT",
         "user_id": "TEXT",
         "type": "TEXT",
-        "channel": "TEXT",
-        "status": "TEXT",
-        "attempts": "INTEGER",
-        "payload": "TEXT",
+        "channel": "TEXT DEFAULT 'email'",
+        "status": "TEXT DEFAULT 'QUEUED'",
+        "attempts": "INTEGER DEFAULT 0",
+        "payload": "TEXT DEFAULT '{}'",
         "next_attempt_at": "TEXT",
         "created_at": "TEXT",
         "last_error": "TEXT",
@@ -181,8 +180,7 @@ def ensure_runtime_tables(c: sqlite3.Connection):
         if column not in existing:
             try:
                 c.execute(
-                    f"ALTER TABLE notifications "
-                    f"ADD COLUMN {column} {definition}"
+                    f'ALTER TABLE notifications ADD COLUMN "{column}" {definition}'
                 )
             except sqlite3.Error:
                 pass
