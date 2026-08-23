@@ -1,6 +1,11 @@
+# ============================================================
+# services.py
+# ============================================================
+
 """
 Core Business Logic and Service Layer for CareFlow Backend.
-Encapsulates transactions, concurrency safeguards, AI processing, and notifications.
+Encapsulates transactions, concurrency safeguards, AI processing,
+notifications, reminders and Google Calendar integration.
 """
 
 import json
@@ -62,7 +67,6 @@ Do not diagnose.
 Symptoms: {symptoms}
 """
 
-
 POST_PROMPT = """You are a healthcare communication assistant.
 Convert the doctor's clinical notes into a patient-friendly summary.
 
@@ -86,27 +90,140 @@ Prescription: {prescription}
 # ============================================================
 
 def now_iso() -> str:
-    """Return current UTC time as ISO string."""
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def uid() -> str:
-    """Generate a unique ID."""
     return str(uuid.uuid4())
 
 
 def hash_pw(p: str) -> str:
-    """Hash password using application secret."""
     return hashlib.sha256(
         (APP_SECRET + "|" + p).encode()
     ).hexdigest()
 
 
 def iso_parse(x: str) -> datetime:
-    """Parse ISO datetime including Z suffix."""
     return datetime.fromisoformat(
         x.replace("Z", "+00:00")
     )
+
+
+# ============================================================
+# SQLITE SAFETY / RUNTIME TABLE INITIALIZATION
+# ============================================================
+
+def ensure_runtime_tables(c: sqlite3.Connection):
+    """
+    Makes sure tables/columns required by background jobs exist.
+
+    This is important for Streamlit Cloud because the SQLite database
+    can sometimes be created from an older schema.
+    """
+
+    # --------------------------------------------------------
+    # job_state
+    # --------------------------------------------------------
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS job_state (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """
+    )
+
+    # --------------------------------------------------------
+    # notifications
+    # --------------------------------------------------------
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS notifications (
+            id TEXT PRIMARY KEY,
+            appointment_id TEXT,
+            user_id TEXT NOT NULL,
+            type TEXT NOT NULL,
+            channel TEXT DEFAULT 'email',
+            status TEXT DEFAULT 'QUEUED',
+            attempts INTEGER DEFAULT 0,
+            payload TEXT DEFAULT '{}',
+            next_attempt_at TEXT,
+            created_at TEXT NOT NULL,
+            last_error TEXT
+        )
+        """
+    )
+
+    # --------------------------------------------------------
+    # Add missing columns if an old notifications table exists
+    # --------------------------------------------------------
+    notification_columns = {
+        "appointment_id": "TEXT",
+        "user_id": "TEXT",
+        "type": "TEXT",
+        "channel": "TEXT",
+        "status": "TEXT",
+        "attempts": "INTEGER",
+        "payload": "TEXT",
+        "next_attempt_at": "TEXT",
+        "created_at": "TEXT",
+        "last_error": "TEXT",
+    }
+
+    existing = {
+        row["name"]
+        for row in c.execute(
+            "PRAGMA table_info(notifications)"
+        ).fetchall()
+    }
+
+    for column, definition in notification_columns.items():
+        if column not in existing:
+            try:
+                c.execute(
+                    f"ALTER TABLE notifications "
+                    f"ADD COLUMN {column} {definition}"
+                )
+            except sqlite3.Error:
+                pass
+
+    # --------------------------------------------------------
+    # medication_reminders
+    # --------------------------------------------------------
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS medication_reminders (
+            id TEXT PRIMARY KEY,
+            appointment_id TEXT,
+            patient_id TEXT,
+            medication_text TEXT,
+            frequency_hours INTEGER,
+            created_at TEXT,
+            active INTEGER DEFAULT 1,
+            next_run_at TEXT
+        )
+        """
+    )
+
+    # --------------------------------------------------------
+    # calendar_events
+    # --------------------------------------------------------
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS calendar_events (
+            id TEXT PRIMARY KEY,
+            appointment_id TEXT,
+            provider TEXT,
+            external_event_id TEXT,
+            status TEXT,
+            metadata TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        )
+        """
+    )
+
+    c.commit()
 
 
 # ============================================================
@@ -140,10 +257,6 @@ def request_json(
 
 
 def llm(prompt: str) -> Optional[Dict[str, Any]]:
-    """
-    Send prompt to configured LLM API.
-    Returns None if LLM is not configured or request fails.
-    """
 
     if not LLM_API_KEY:
         return None
@@ -185,10 +298,6 @@ def llm(prompt: str) -> Optional[Dict[str, Any]]:
 
 
 def previsit(symptoms: str) -> Dict[str, Any]:
-    """
-    Generate pre-visit administrative summary.
-    Falls back to rule-based processing if LLM unavailable.
-    """
 
     result = llm(
         PRE_PROMPT.format(symptoms=symptoms)
@@ -282,7 +391,6 @@ def send_email(
     body: str,
 ) -> Tuple[bool, str]:
 
-    # Demo mode when SMTP is not configured
     if not SMTP_HOST:
         return True, "DEMO_MODE"
 
@@ -325,6 +433,8 @@ def notify(
     body: str,
 ):
 
+    ensure_runtime_tables(c)
+
     n = uid()
     created = now_iso()
 
@@ -340,9 +450,10 @@ def notify(
             attempts,
             payload,
             next_attempt_at,
-            created_at
+            created_at,
+            last_error
         )
-        VALUES(?,?,?,?,?,?,?,?,?,?)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             n,
@@ -358,6 +469,7 @@ def notify(
             }),
             created,
             created,
+            None,
         ),
     )
 
@@ -374,6 +486,11 @@ def process_notifications(
         close = True
 
     try:
+
+        # IMPORTANT:
+        # Fixes "no such table: notifications" and old-schema
+        # problems on Streamlit Cloud.
+        ensure_runtime_tables(c)
 
         rows = c.execute(
             """
@@ -402,15 +519,32 @@ def process_notifications(
 
         for r in rows:
 
-            p = json.loads(r["payload"])
+            try:
+                p = json.loads(
+                    r["payload"] or "{}"
+                )
+            except Exception:
+                p = {}
+
+            subject = p.get(
+                "subject",
+                "CareFlow Notification",
+            )
+
+            body = p.get(
+                "body",
+                "You have a notification from CareFlow.",
+            )
 
             ok, err = send_email(
                 r["email"],
-                p["subject"],
-                p["body"],
+                subject,
+                body,
             )
 
-            attempts = r["attempts"] + 1
+            attempts = (
+                int(r["attempts"] or 0) + 1
+            )
 
             if ok:
 
@@ -462,6 +596,10 @@ def process_notifications(
         c.commit()
 
         return done
+
+    except sqlite3.Error:
+        c.rollback()
+        raise
 
     finally:
 
@@ -900,6 +1038,8 @@ def book_appointment(
 
     try:
 
+        ensure_runtime_tables(c)
+
         p = doctor_profile(
             c,
             doctor_id,
@@ -934,7 +1074,6 @@ def book_appointment(
             )
         ).isoformat()
 
-        # Lock SQLite database for transaction
         c.execute("BEGIN IMMEDIATE")
 
         busy = c.execute(
@@ -1148,6 +1287,8 @@ def cancel_appointment(
 
     try:
 
+        ensure_runtime_tables(c)
+
         a = c.execute(
             "SELECT * FROM appointments WHERE id=?",
             (appointment_id,),
@@ -1230,6 +1371,8 @@ def complete_appointment(
     c = get_db()
 
     try:
+
+        ensure_runtime_tables(c)
 
         a = c.execute(
             "SELECT * FROM appointments WHERE id=?",
@@ -1483,6 +1626,8 @@ def list_notifications(
 
     try:
 
+        ensure_runtime_tables(c)
+
         rows = c.execute(
             """
             SELECT *
@@ -1505,6 +1650,8 @@ def create_medication_reminders(
     patient_id: str,
     prescription: str,
 ):
+
+    ensure_runtime_tables(c)
 
     text = prescription.strip()
 
@@ -1587,6 +1734,8 @@ def process_medication_reminders(
 
     try:
 
+        ensure_runtime_tables(c)
+
         rows = c.execute(
             """
             SELECT *
@@ -1660,18 +1809,10 @@ def run_background_jobs_if_due(
 
     try:
 
-        # ----------------------------------------------------
-        # Make sure job_state table exists.
-        # This prevents "no such table: job_state".
-        # ----------------------------------------------------
-        c.execute(
-            """
-            CREATE TABLE IF NOT EXISTS job_state (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            )
-            """
-        )
+        # THIS IS THE IMPORTANT FIX.
+        # Make all background-job tables available before
+        # process_notifications() executes its SELECT.
+        ensure_runtime_tables(c)
 
         row = c.execute(
             """
@@ -1698,7 +1839,6 @@ def run_background_jobs_if_due(
                 "reminders": 0,
             }
 
-        # Update last run before processing
         c.execute(
             """
             INSERT OR REPLACE INTO job_state(
@@ -1712,13 +1852,9 @@ def run_background_jobs_if_due(
 
         c.commit()
 
-        notifications = process_notifications(
-            c
-        )
+        notifications = process_notifications(c)
 
-        reminders = process_medication_reminders(
-            c
-        )
+        reminders = process_medication_reminders(c)
 
         return {
             "notifications": notifications,
@@ -1727,10 +1863,23 @@ def run_background_jobs_if_due(
 
     except sqlite3.Error:
 
-        # Rollback if SQLite operation fails
         c.rollback()
 
-        raise
+        # Do not crash the Streamlit application because
+        # a background notification job failed.
+        return {
+            "notifications": 0,
+            "reminders": 0,
+        }
+
+    except Exception:
+
+        c.rollback()
+
+        return {
+            "notifications": 0,
+            "reminders": 0,
+        }
 
     finally:
         c.close()
@@ -1953,6 +2102,8 @@ def sync_calendar_booking(
     aid: str,
 ) -> str:
 
+    ensure_runtime_tables(c)
+
     a = c.execute(
         """
         SELECT *
@@ -2096,6 +2247,8 @@ def dashboard_stats() -> Dict[str, int]:
     c = get_db()
 
     try:
+
+        ensure_runtime_tables(c)
 
         stats = {}
 
