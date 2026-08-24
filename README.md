@@ -3,10 +3,26 @@
 [Click here to open the Healthcare Appointment Manager](https://zrpsf2hx8juw3jjh4wajxs.streamlit.app/)
 
 # CareFlow — Healthcare Appointment & Follow-up Manager
+## LLM Prompts
 
+### Pre-Visit Summary
+Create a short summary of the patient's appointment information for the doctor. Do not invent information or provide a medical diagnosis.
+
+### Post-Visit Summary
+Summarize the completed visit using the information provided by the doctor. Do not add information that was not provided.
 A modern, full-stack healthcare appointment platform featuring a **dedicated FastAPI REST API Backend**, a **standalone Table-Based Relational Database**, and an interactive **Streamlit Frontend UI**.
 
 ---
+## Google Calendar Setup
+
+1. Create a project in Google Cloud.
+2. Enable the Google Calendar API.
+3. Set up the OAuth consent screen.
+4. Create OAuth credentials.
+5. Add the application's redirect URL.
+6. Add the Google credentials to `.env`.
+7. Start the application.
+8. Connect Google Calendar from the application.
 
 ## 🌟 Architecture Overview
 
