@@ -1,6 +1,6 @@
 ## 🚀 Live Application
 
-[Click here to open the Healthcare Appointment Manager](https://healthcare-appointment-manager-3-84ci.onrender.com/)
+[Click here to open the Healthcare Appointment Manager](https://zrpsf2hx8juw3jjh4wajxs.streamlit.app/)
 
 # CareFlow — Healthcare Appointment & Follow-up Manager
 
