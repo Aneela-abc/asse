@@ -1,3 +1,7 @@
+## 🚀 Live Application
+
+[Click here to open the Healthcare Appointment Manager](https://healthcare-appointment-manager-3-84ci.onrender.com/)
+
 # CareFlow — Healthcare Appointment & Follow-up Manager
 
 A modern, full-stack healthcare appointment platform featuring a **dedicated FastAPI REST API Backend**, a **standalone Table-Based Relational Database**, and an interactive **Streamlit Frontend UI**.
